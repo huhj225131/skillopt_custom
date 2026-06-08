@@ -42,5 +42,6 @@ model:
   target_backend: qwen_chat
   optimizer: Qwen/Qwen3.6-27B
   target: Qwen/Qwen3.6-27B
+  qwen_chat_base_url: http://localhost:8000/v1
   qwen_chat_max_tokens: 32000
   qwen_chat_enable_thinking: true
