@@ -12,6 +12,7 @@ env:
   input_levels: level2,level3,level4 # 3 levels input, mỗi level 200 câu -> tổng 600 câu
   split_mode: ratio
   split_ratio: "8:1:1"            # Train 480 : Val 60 : Test 60
+  skill_init: skillopt/envs/SeePhysCaption/skills/initial.md
 # ── Training ─────────────────────────────────────
 train:
   num_epochs: 5
