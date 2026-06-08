@@ -101,6 +101,13 @@ def _register_builtins() -> None:
         _ENV_REGISTRY["seephys2025"] = SeePhys2025Adapter
     except ImportError:
         pass
+    try:
+        from skillopt.envs.SeePhysCaption.adapter import SeePhysCaptionAdapter
+        
+        _ENV_REGISTRY["SeePhysCaption"] = SeePhysCaptionAdapter
+        _ENV_REGISTRY["seephyscaption"] = SeePhysCaptionAdapter
+    except ImportError:
+        pass
 
 
 def get_adapter(cfg: dict):
