@@ -1,0 +1,42 @@
+_base_: ['../_base_/default.yaml']
+
+env:
+  name: SeePhys2025
+  data_path: SeePhys_data
+  split_mode: ratio
+  split_ratio: "4:1:5"
+  split_seed: 42
+  limit: 400
+  exec_timeout: 180
+
+train:
+  num_epochs: 4
+  batch_size: 32
+  seed: 42
+
+gradient:
+  analyst_workers: 16
+  minibatch_size: 8
+
+optimizer:
+  learning_rate: 4
+  lr_scheduler: cosine
+  use_slow_update: true
+  use_meta_skill: true
+
+evaluation:
+  use_gate: true
+  sel_env_num: 16
+  test_env_num: 32
+  eval_test: true
+
+model:
+  backend: qwen_chat
+  optimizer_backend: qwen_chat
+  target_backend: qwen_chat
+  optimizer: Qwen/Qwen3.6-27B
+  target: Qwen/Qwen3.6-27B
+  qwen_chat_base_url: http://localhost:8000/v1,http://localhost:8001/v1
+  qwen_chat_timeout_seconds: 300
+  qwen_chat_max_tokens: 32000
+  qwen_chat_enable_thinking: true

@@ -76,7 +76,19 @@ def chat_optimizer(
     stage: str = "optimizer",
     reasoning_effort: str | None = None,
     timeout: int | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[str, dict]:
+    if get_optimizer_backend() == "qwen_chat":
+        return _qwen.chat_optimizer(
+            system=system,
+            user=user,
+            max_completion_tokens=max_completion_tokens,
+            retries=retries,
+            stage=stage,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
+            enable_thinking=enable_thinking,
+        )
     if get_optimizer_backend() == "claude_chat":
         return _claude.chat_optimizer(
             system=system,
@@ -105,6 +117,7 @@ def chat_target(
     stage: str = "target",
     reasoning_effort: str | None = None,
     timeout: int | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[str, dict]:
     if get_target_backend() == "claude_chat":
         return _claude.chat_target(
@@ -123,6 +136,7 @@ def chat_target(
             retries=retries,
             stage=stage,
             reasoning_effort=reasoning_effort,
+            enable_thinking=enable_thinking,
         )
     if not is_target_chat_backend():
         raise NotImplementedError(
@@ -151,7 +165,21 @@ def chat_optimizer_messages(
     tool_choice: str | dict[str, Any] | None = None,
     return_message: bool = False,
     timeout: int | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[Any, dict]:
+    if get_optimizer_backend() == "qwen_chat":
+        return _qwen.chat_optimizer_messages(
+            messages=messages,
+            max_completion_tokens=max_completion_tokens,
+            retries=retries,
+            stage=stage,
+            reasoning_effort=reasoning_effort,
+            tools=tools,
+            tool_choice=tool_choice,
+            return_message=return_message,
+            timeout=timeout,
+            enable_thinking=enable_thinking,
+        )
     if get_optimizer_backend() == "claude_chat":
         return _claude.chat_optimizer_messages(
             messages=messages,
@@ -187,6 +215,7 @@ def chat_target_messages(
     tool_choice: str | dict[str, Any] | None = None,
     return_message: bool = False,
     timeout: int | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[Any, dict]:
     if get_target_backend() == "claude_chat":
         return _claude.chat_target_messages(
@@ -209,6 +238,7 @@ def chat_target_messages(
             tools=tools,
             tool_choice=tool_choice,
             return_message=return_message,
+            enable_thinking=enable_thinking,
         )
     if not is_target_chat_backend():
         raise NotImplementedError(
@@ -375,6 +405,7 @@ def configure_qwen_chat(
     timeout_seconds: float | str | None = None,
     max_tokens: int | str | None = None,
     enable_thinking: bool | str | None = None,
+    debug_dir: str | None = None,
 ) -> None:
     _qwen.configure_qwen_chat(
         base_url=base_url,
@@ -383,6 +414,7 @@ def configure_qwen_chat(
         timeout_seconds=timeout_seconds,
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
+        debug_dir=debug_dir,
     )
 
 
@@ -401,3 +433,4 @@ def set_target_deployment(deployment: str) -> None:
 def set_optimizer_deployment(deployment: str) -> None:
     _openai.set_optimizer_deployment(deployment)
     _claude.set_optimizer_deployment(deployment)
+    _qwen.set_optimizer_deployment(deployment)

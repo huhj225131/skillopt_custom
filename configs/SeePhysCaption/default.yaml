@@ -1,0 +1,46 @@
+# ──────────────────────────────────────────────────
+# SkillOpt Config — SeePhysCaption
+# ──────────────────────────────────────────────────
+
+_base_: ['../_base_/default.yaml']
+
+# ── Environment ──────────────────────────────────
+env:
+  name: SeePhysCaption            # Tên tương ứng với registry (nếu bạn có đăng ký env class này)
+  base_data_path: /media/hung/DATA/SkillOpt/SeePhys_2026_data  
+  target_level: level1            # File ground truth (đáp án)
+  input_levels: level2,level3,level4 # 3 levels input, mỗi level 200 câu -> tổng 600 câu
+  split_mode: ratio
+  split_ratio: "8:1:1"            # Train 480 : Val 60 : Test 60
+# ── Training ─────────────────────────────────────
+train:
+  num_epochs: 5
+  batch_size: 40                  # Minibatch Rollout
+  seed: 42
+
+# ── Gradient (Reflection) ───────────────────────
+gradient:
+  analyst_workers: 16             # Số luồng phân tích lỗi song song
+  minibatch_size: 8
+
+# ── Optimizer ────────────────────────────────────
+optimizer:
+  learning_rate: 4                # Tối đa 4 sửa đổi cho skill file trong mỗi epoch
+  lr_scheduler: constant 
+  use_slow_update: true
+  use_meta_skill: true
+
+# ── Evaluation ───────────────────────────────────
+evaluation:
+  use_gate: true                  # Chạy đánh giá để xem skill mới có tốt hơn skill cũ không
+  eval_test: true
+
+# ── Model ────────────────────────────────────────
+model:
+  backend: qwen_chat
+  optimizer_backend: qwen_chat
+  target_backend: qwen_chat
+  optimizer: Qwen/Qwen3.6-27B
+  target: Qwen/Qwen3.6-27B
+  qwen_chat_max_tokens: 32000
+  qwen_chat_enable_thinking: true

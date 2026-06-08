@@ -377,7 +377,7 @@ def run_slow_update(
         response, _ = chat_optimizer(
             system=actual_system,
             user=user,
-            max_completion_tokens=4096,
+            max_completion_tokens=10000,
             retries=3,
             stage="slow_update",
         )

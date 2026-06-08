@@ -139,9 +139,28 @@ def _load_yaml(path: str, _visited: set[str] | None = None) -> dict:
 
     base_ref = cfg.pop("_base_", None)
     if base_ref:
-        base_path = os.path.join(os.path.dirname(abs_path), base_ref)
-        base_cfg = _load_yaml(base_path, _visited)
-        cfg = _deep_merge(base_cfg, cfg)
+        if isinstance(base_ref, str):
+            base_refs = [base_ref]
+        elif isinstance(base_ref, (list, tuple)):
+            base_refs = list(base_ref)
+        else:
+            raise TypeError(
+                "_base_ must be a string or list/tuple of strings, "
+                f"got {type(base_ref).__name__}"
+            )
+
+        merged_base_cfg: dict = {}
+        for ref in base_refs:
+            if not isinstance(ref, str):
+                raise TypeError(
+                    "Each entry in _base_ must be a string path, "
+                    f"got {type(ref).__name__}"
+                )
+            base_path = os.path.join(os.path.dirname(abs_path), ref)
+            base_cfg = _load_yaml(base_path, _visited)
+            merged_base_cfg = _deep_merge(merged_base_cfg, base_cfg)
+
+        cfg = _deep_merge(merged_base_cfg, cfg)
 
     return cfg
 

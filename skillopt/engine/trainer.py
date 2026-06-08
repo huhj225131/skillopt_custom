@@ -599,7 +599,7 @@ class ReflACTTrainer:
                 optimizer_backend = optimizer_backend or "openai_chat"
                 target_backend = target_backend or "claude_code_exec"
             elif backend in {"qwen", "qwen_chat"}:
-                optimizer_backend = optimizer_backend or "openai_chat"
+                optimizer_backend = optimizer_backend or "qwen_chat"
                 target_backend = target_backend or "qwen_chat"
             else:
                 optimizer_backend = optimizer_backend or "openai_chat"
@@ -635,6 +635,7 @@ class ReflACTTrainer:
             timeout_seconds=cfg.get("qwen_chat_timeout_seconds"),
             max_tokens=cfg.get("qwen_chat_max_tokens"),
             enable_thinking=cfg.get("qwen_chat_enable_thinking"),
+            debug_dir=os.path.join(out_root, "qwen_debug"),
         )
         os.environ["REFLACT_CODEX_TRACE_TO_OPTIMIZER"] = (
             "1"
@@ -663,14 +664,21 @@ class ReflACTTrainer:
                 ray.init(num_gpus=0)
 
         # ── Load initial skill ───────────────────────────────────────────
-        skill_init_path = os.path.abspath(cfg["skill_init"])
-        if os.path.exists(skill_init_path):
+        raw_skill_init = str(cfg.get("skill_init", "") or "").strip()
+        skill_init_path = os.path.abspath(raw_skill_init) if raw_skill_init else ""
+        if skill_init_path and os.path.isfile(skill_init_path):
             with open(skill_init_path) as f:
                 skill_init = f.read()
             print(f"  [initial skill] {skill_init_path} ({len(skill_init)} chars)")
         else:
             skill_init = ""
-            print("  [initial skill] no initial skill file — starting from blank")
+            if skill_init_path and os.path.exists(skill_init_path) and not os.path.isfile(skill_init_path):
+                print(
+                    "  [initial skill] skill_init points to a directory; "
+                    "starting from blank"
+                )
+            else:
+                print("  [initial skill] no initial skill file — starting from blank")
 
         # ── Training parameters ──────────────────────────────────────────
         batch_size = cfg["batch_size"]
@@ -856,6 +864,8 @@ class ReflACTTrainer:
             )
             print(f"  Selection items: {sel_n}")
             baseline_dir = os.path.join(out_root, "selection_eval_baseline")
+            os.makedirs(baseline_dir, exist_ok=True)
+            configure_qwen_chat(debug_dir=baseline_dir)
             baseline_results = adapter.rollout(sel_env, skill_init, baseline_dir)
             current_score, baseline_soft = compute_score(baseline_results)
             best_score = current_score
@@ -920,6 +930,7 @@ class ReflACTTrainer:
                 step_t0 = time.time()
                 step_dir = os.path.join(out_root, "steps", f"step_{global_step:04d}")
                 os.makedirs(step_dir, exist_ok=True)
+                configure_qwen_chat(debug_dir=step_dir)
 
                 tokens_before = get_token_summary()
 
@@ -1408,6 +1419,8 @@ class ReflACTTrainer:
             use_slow = cfg.get("use_slow_update", False)
             if use_slow:
                 slow_dir = os.path.join(out_root, "slow_update", f"epoch_{epoch:02d}")
+                os.makedirs(slow_dir, exist_ok=True)
+                configure_qwen_chat(debug_dir=slow_dir)
                 slow_done_path = os.path.join(slow_dir, "slow_result.json")
 
                 if os.path.exists(slow_done_path):
@@ -1766,6 +1779,7 @@ class ReflACTTrainer:
             )
             print(f"  Test items: {test_n}")
             baseline_test_dir = os.path.join(out_root, "test_eval_baseline")
+            os.makedirs(baseline_test_dir, exist_ok=True)
             baseline_test_results = adapter.rollout(test_env, skill_init, baseline_test_dir)
             baseline_test_hard, baseline_test_soft = compute_score(baseline_test_results)
             baseline_buckets = _compute_task_type_buckets(baseline_test_results, task_types)
@@ -1800,6 +1814,7 @@ class ReflACTTrainer:
             )
             print(f"  Test items: {test_n2}")
             test_dir = os.path.join(out_root, "test_eval")
+            os.makedirs(test_dir, exist_ok=True)
             test_results = adapter.rollout(test_env2, best_skill, test_dir)
             test_hard, test_soft = compute_score(test_results)
             best_buckets = _compute_task_type_buckets(test_results, task_types)
@@ -1909,4 +1924,4 @@ class ReflACTTrainer:
                 f"calls={t['calls']})"
             )
 
-        return summary
+        return summarya

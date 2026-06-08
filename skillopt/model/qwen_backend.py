@@ -5,9 +5,12 @@ import json
 import os
 import threading
 import time
-import urllib.error
-import urllib.request
 from typing import Any
+import tempfile
+import threading as _thr
+
+import httpx
+from openai import OpenAI
 
 from skillopt.model.common import (
     CompatAssistantMessage,
@@ -17,15 +20,15 @@ from skillopt.model.common import (
     default_model_for_backend,
 )
 
-BASE_URL = os.environ.get("QWEN_CHAT_BASE_URL", "http://localhost:8000/v1")
+BASE_URL = os.environ.get("QWEN_CHAT_BASE_URL", "http://localhost:8001/v1")
 API_KEY = os.environ.get("QWEN_CHAT_API_KEY", "")
 TIMEOUT_SECONDS = float(os.environ.get("QWEN_CHAT_TIMEOUT_SECONDS", "300") or 300)
-MAX_TOKENS = int(os.environ.get("QWEN_CHAT_MAX_TOKENS", "8000") or 8000)
+MAX_TOKENS = int(os.environ.get("QWEN_CHAT_MAX_TOKENS", "10000") or 10000)
 TEMPERATURE: float | None = None
 _raw_temperature = os.environ.get("QWEN_CHAT_TEMPERATURE", "0.7").strip()
 if _raw_temperature:
     TEMPERATURE = float(_raw_temperature)
-ENABLE_THINKING = os.environ.get("QWEN_CHAT_ENABLE_THINKING", "false").strip().lower() in {
+ENABLE_THINKING = os.environ.get("QWEN_CHAT_ENABLE_THINKING", "true").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -36,9 +39,15 @@ TARGET_DEPLOYMENT = os.environ.get(
     "TARGET_DEPLOYMENT",
     default_model_for_backend("qwen_chat"),
 )
+OPTIMIZER_DEPLOYMENT = os.environ.get(
+    "OPTIMIZER_DEPLOYMENT",
+    default_model_for_backend("qwen_chat"),
+)
 
 _config_lock = threading.Lock()
 tracker = TokenTracker()
+_client: OpenAI | None = None
+DEBUG_DIR = ""
 
 
 def _chat_url() -> str:
@@ -46,6 +55,36 @@ def _chat_url() -> str:
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
+
+
+_clients: list[OpenAI] = []
+_client_index = 0
+_last_initialized_base_url = ""
+
+
+def _get_client() -> OpenAI:
+    global _clients, _client_index, _last_initialized_base_url
+    with _config_lock:
+        urls = [u.strip() for u in BASE_URL.split(",") if u.strip()]
+        if not urls:
+            urls = ["http://localhost:8000/v1"]
+            
+        if not _clients or BASE_URL != _last_initialized_base_url:
+            _clients = []
+            for url in urls:
+                c = OpenAI(
+                    api_key=API_KEY or "dummy",
+                    base_url=url,
+                    timeout=httpx.Timeout(TIMEOUT_SECONDS, connect=60.0),
+                    max_retries=5,
+                )
+                _clients.append(c)
+            _client_index = 0
+            _last_initialized_base_url = BASE_URL
+            
+        client = _clients[_client_index]
+        _client_index = (_client_index + 1) % len(_clients)
+        return client
 
 
 def _json_safe(value: Any) -> Any:
@@ -103,28 +142,113 @@ def _compat_message_from_payload(message: dict[str, Any], choice: dict[str, Any]
     )
 
 
+def _extract_chunk_text(chunk: Any) -> str:
+    try:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return ""
+        choice0 = choices[0]
+        delta = getattr(choice0, "delta", None)
+        if delta is None and isinstance(choice0, dict):
+            delta = choice0.get("delta")
+        reasoning_parts: list[str] = []
+        content = getattr(delta, "content", None) if delta is not None else None
+        if content is None and isinstance(delta, dict):
+            content = delta.get("content")
+        reasoning_content = getattr(delta, "reasoning_content", None) if delta is not None else None
+        if reasoning_content is None and isinstance(delta, dict):
+            reasoning_content = delta.get("reasoning_content")
+        if isinstance(content, str):
+            content_text = content
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    parts.append(str(part.get("text") or part.get("content") or json.dumps(part, ensure_ascii=False)))
+                else:
+                    parts.append(str(part))
+            content_text = "".join(parts)
+        elif isinstance(delta, str):
+            content_text = delta
+        else:
+            content_text = ""
+
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            reasoning_parts.append(reasoning_content)
+        elif isinstance(reasoning_content, list):
+            for part in reasoning_content:
+                if isinstance(part, str):
+                    reasoning_parts.append(part)
+                elif isinstance(part, dict):
+                    reasoning_parts.append(str(part.get("text") or part.get("content") or json.dumps(part, ensure_ascii=False)))
+                else:
+                    reasoning_parts.append(str(part))
+
+        reasoning_text = "".join(reasoning_parts).strip()
+        if content_text.strip():
+            return content_text
+        if reasoning_text:
+            return reasoning_text
+        return ""
+    except Exception:
+        return ""
+
+
 def _post_chat_completion(payload: dict[str, Any], timeout: float | None) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
-    req = urllib.request.Request(
-        _chat_url(),
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT_SECONDS) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Qwen chat API returned HTTP {e.code}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Qwen chat API request failed: {e}") from e
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Qwen chat API returned non-JSON response: {raw[:1000]}") from e
+    client = _get_client()
+    create_kwargs: dict[str, Any] = {
+        "model": payload["model"],
+        "messages": payload["messages"],
+        "max_tokens": payload["max_tokens"],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": ENABLE_THINKING}},
+    }
+    if timeout is not None:
+        create_kwargs["timeout"] = timeout
+    if "temperature" in payload:
+        create_kwargs["temperature"] = payload["temperature"]
+    if "tools" in payload:
+        create_kwargs["tools"] = payload["tools"]
+    if "tool_choice" in payload:
+        create_kwargs["tool_choice"] = payload["tool_choice"]
+
+    stream = client.chat.completions.create(**create_kwargs)
+    chunks: list[Any] = []
+    text_parts: list[str] = []
+    usage_info = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    last_finish_reason: str | None = None
+    for chunk in stream:
+        chunks.append(_json_safe(chunk))
+        try:
+            if getattr(chunk, "usage", None):
+                usage_info = {
+                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                }
+            choices = getattr(chunk, "choices", None) or []
+            if choices:
+                choice0 = choices[0]
+                last_finish_reason = getattr(choice0, "finish_reason", None) or last_finish_reason
+                part = _extract_chunk_text(chunk)
+                if part:
+                    text_parts.append(part)
+        except Exception:
+            pass
+
+    text = "".join(text_parts)
+    if not usage_info["total_tokens"]:
+        usage_info["total_tokens"] = usage_info["prompt_tokens"] + usage_info["completion_tokens"]
+    return {
+        "text": text,
+        "usage": usage_info,
+        "chunks": chunks,
+        "finish_reason": last_finish_reason,
+        "payload": payload,
+    }
 
 
 def _chat_messages_impl(
@@ -138,13 +262,15 @@ def _chat_messages_impl(
     return_message: bool = False,
     deployment: str | None = None,
     timeout: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[Any, dict[str, int]]:
     payload: dict[str, Any] = {
         "model": deployment or TARGET_DEPLOYMENT,
         "messages": _json_safe(messages),
         "max_tokens": min(max_completion_tokens, MAX_TOKENS),
     }
-    payload["chat_template_kwargs"] = {"enable_thinking": ENABLE_THINKING}
+    thinking_opt = enable_thinking if enable_thinking is not None else ENABLE_THINKING
+    payload["chat_template_kwargs"] = {"enable_thinking": thinking_opt}
     if TEMPERATURE is not None:
         payload["temperature"] = TEMPERATURE
     if tools:
@@ -156,18 +282,65 @@ def _chat_messages_impl(
     for attempt in range(retries):
         try:
             data = _post_chat_completion(payload, timeout)
-            choices = data.get("choices") or []
-            if not choices:
-                raise RuntimeError(f"Qwen chat API returned no choices: {data}")
-            choice0 = choices[0]
-            message = choice0.get("message") or {}
-            text = message.get("content") or ""
-            if not isinstance(text, str):
-                text = json.dumps(text, ensure_ascii=False)
-            usage_info = _usage_from_payload(data)
+            # Optionally print full payload/response to terminal for immediate inspection
+            if os.environ.get("QWEN_DEBUG_PRINT", "").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    print("[QWEN DEBUG PAYLOAD]", flush=True)
+                    print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+                    print("[QWEN DEBUG RESPONSE]", flush=True)
+                    print(json.dumps(data, ensure_ascii=False, indent=2), flush=True)
+                except Exception:
+                    pass
+            # Persistent debug directory if configured
+            if DEBUG_DIR:
+                try:
+                    os.makedirs(DEBUG_DIR, exist_ok=True)
+                    is_optimizer = stage in {"optimizer", "analyst", "aggregate", "ranking", "slow_update", "meta_skill"}
+                    prefix = "optimizer" if is_optimizer else "target"
+                    
+                    # Log request
+                    req_name = f"{prefix}_api_request_{stage}_{int(time.time() * 1000)}_{_thr.get_ident()}.json"
+                    with open(os.path.join(DEBUG_DIR, req_name), "w", encoding="utf-8") as df:
+                        json.dump(payload, df, ensure_ascii=False, indent=2)
+                        
+                    # Log response
+                    resp_name = f"{prefix}_api_response_{stage}_{int(time.time() * 1000)}_{_thr.get_ident()}.json"
+                    with open(os.path.join(DEBUG_DIR, resp_name), "w", encoding="utf-8") as df:
+                        json.dump(data, df, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            # Optional debug: persist full request/response to temp when requested
+            if os.environ.get("QWEN_DEBUG_IO", "").strip().lower() in {"1", "true", "yes", "on"}:
+                try:
+                    debug_path = tempfile.gettempdir()
+                    fname = f"qwen_debug_{stage}_{int(time.time())}_{_thr.get_ident()}.json"
+                    with open(os.path.join(debug_path, fname), "w", encoding="utf-8") as df:
+                        json.dump({"payload": payload, "response": data}, df, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            text = str(data.get("text") or "")
+            usage_info = data.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
             tracker.record(stage, usage_info["prompt_tokens"], usage_info["completion_tokens"])
+            # If extracted text is empty, persist the full request/response for offline inspection
+            if not text or str(text).strip() == "":
+                try:
+                    debug_path = tempfile.gettempdir()
+                    fname = f"qwen_debug_empty_response_{stage}_{int(time.time())}_{_thr.get_ident()}.json"
+                    dbg = {"payload": payload, "response": data}
+                    with open(os.path.join(debug_path, fname), "w", encoding="utf-8") as df:
+                        json.dump(dbg, df, ensure_ascii=False, indent=2)
+                    print(f"[QWEN DEBUG] empty extracted text — dumped full response to {os.path.join(debug_path, fname)}", flush=True)
+                except Exception:
+                    pass
             if return_message:
-                return _compat_message_from_payload(message, choice0), usage_info
+                return CompatAssistantMessage(
+                    content=text,
+                    tool_calls=[],
+                    metadata={
+                        "finish_reason": data.get("finish_reason"),
+                        "chunks": data.get("chunks", []),
+                    },
+                ), usage_info
             return text, usage_info
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -183,9 +356,12 @@ def configure_qwen_chat(
     timeout_seconds: float | str | None = None,
     max_tokens: int | str | None = None,
     enable_thinking: bool | str | None = None,
+    debug_dir: str | None = None,
 ) -> None:
-    global BASE_URL, API_KEY, TEMPERATURE, TIMEOUT_SECONDS, MAX_TOKENS, ENABLE_THINKING
+    global BASE_URL, API_KEY, TEMPERATURE, TIMEOUT_SECONDS, MAX_TOKENS, ENABLE_THINKING, DEBUG_DIR, _client
     with _config_lock:
+        if debug_dir is not None:
+            DEBUG_DIR = str(debug_dir).strip()
         if base_url is not None:
             BASE_URL = str(base_url).strip() or BASE_URL
             os.environ["QWEN_CHAT_BASE_URL"] = BASE_URL
@@ -208,6 +384,7 @@ def configure_qwen_chat(
             else:
                 ENABLE_THINKING = bool(enable_thinking)
             os.environ["QWEN_CHAT_ENABLE_THINKING"] = "true" if ENABLE_THINKING else "false"
+        _client = None
 
 
 def get_max_tokens() -> int:
@@ -222,6 +399,7 @@ def chat_target(
     stage: str = "target",
     reasoning_effort: str | None = None,
     timeout: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[str, dict[str, int]]:
     del reasoning_effort
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -231,6 +409,30 @@ def chat_target(
         retries,
         stage,
         timeout=timeout,
+        enable_thinking=enable_thinking,
+    )
+
+
+def chat_optimizer(
+    system: str,
+    user: str,
+    max_completion_tokens: int = 16384,
+    retries: int = 5,
+    stage: str = "optimizer",
+    reasoning_effort: str | None = None,
+    timeout: float | None = None,
+    enable_thinking: bool | None = None,
+) -> tuple[str, dict[str, int]]:
+    del reasoning_effort
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    return _chat_messages_impl(
+        messages,
+        max_completion_tokens,
+        retries,
+        stage,
+        deployment=OPTIMIZER_DEPLOYMENT,
+        timeout=timeout,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -245,6 +447,7 @@ def chat_target_messages(
     tool_choice: str | dict[str, Any] | None = None,
     return_message: bool = False,
     timeout: float | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[Any, dict[str, int]]:
     del reasoning_effort
     return _chat_messages_impl(
@@ -256,6 +459,35 @@ def chat_target_messages(
         tool_choice=tool_choice,
         return_message=return_message,
         timeout=timeout,
+        enable_thinking=enable_thinking,
+    )
+
+
+def chat_optimizer_messages(
+    messages: list[dict[str, Any]],
+    max_completion_tokens: int = 16384,
+    retries: int = 5,
+    stage: str = "optimizer",
+    reasoning_effort: str | None = None,
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
+    return_message: bool = False,
+    timeout: float | None = None,
+    enable_thinking: bool | None = None,
+) -> tuple[Any, dict[str, int]]:
+    del reasoning_effort
+    return _chat_messages_impl(
+        messages,
+        max_completion_tokens,
+        retries,
+        stage,
+        tools=tools,
+        tool_choice=tool_choice,
+        return_message=return_message,
+        deployment=OPTIMIZER_DEPLOYMENT,
+        timeout=timeout,
+        enable_thinking=enable_thinking,
     )
 
 
@@ -269,6 +501,12 @@ def reset_token_tracker() -> None:
 
 def set_reasoning_effort(effort: str | None) -> None:
     del effort
+
+
+def set_optimizer_deployment(deployment: str) -> None:
+    global OPTIMIZER_DEPLOYMENT
+    OPTIMIZER_DEPLOYMENT = deployment or default_model_for_backend("qwen_chat")
+    os.environ["OPTIMIZER_DEPLOYMENT"] = OPTIMIZER_DEPLOYMENT
 
 
 def set_target_deployment(deployment: str) -> None:

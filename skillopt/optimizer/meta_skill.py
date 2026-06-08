@@ -71,7 +71,7 @@ def run_meta_skill(
         response, _ = chat_optimizer(
             system=actual_system,
             user=user,
-            max_completion_tokens=3072,
+            max_completion_tokens=10000,
             retries=3,
             stage="meta_skill",
         )

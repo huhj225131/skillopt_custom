@@ -21,13 +21,14 @@ Public API
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import random
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from skillopt.model import chat_optimizer
+from skillopt.model import chat_optimizer_messages
 from skillopt.optimizer.meta_skill import format_meta_skill_context
 from skillopt.optimizer.update_modes import (
     get_payload_items,
@@ -51,6 +52,15 @@ def _clip_text(value, limit: int) -> str:
     if value is None:
         return ""
     return str(value)[:limit]
+
+
+def _image_to_data_uri(path: str) -> str:
+    import mimetypes
+
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def fmt_trajectory(
@@ -222,6 +232,75 @@ def fmt_minibatch_trajectories(
     return "\n\n---\n\n".join(parts)
 
 
+def _build_minibatch_user_content(
+    items: list[dict],
+    prediction_dir: str,
+    skill_content: str,
+    edit_budget: int,
+    *,
+    mode: str,
+    step_buffer_context: str = "",
+    rejection_context: str = "",
+    trajectory_memory_context: str = "",
+    meta_skill_context: str = "",
+    trajectory_kind: str,
+) -> list[dict[str, object]]:
+    content: list[dict[str, object]] = [{"type": "text", "text": f"## Current Skill\n{skill_content}\n\n"}]
+    has_trajectory = False
+
+    if is_full_rewrite_minibatch_mode(mode):
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    "## Update Format\n"
+                    "Produce one complete replacement skill candidate for this minibatch. "
+                    "Do not output edits, patches, or revise suggestions.\n\n"
+                ),
+            }
+        )
+    else:
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"## {payload_label(mode, title=True)} Budget\n"
+                    f"Produce at most L={edit_budget} {payload_label(mode)}.\n\n"
+                ),
+            }
+        )
+
+    ctx = step_buffer_context or rejection_context or ""
+    if trajectory_memory_context:
+        ctx = f"{ctx}\n{trajectory_memory_context}" if ctx else trajectory_memory_context
+    if ctx.strip():
+        content.append({"type": "text", "text": f"## Previous Steps in This Epoch\n{ctx}\n\n"})
+
+    optimizer_ctx = format_meta_skill_context(meta_skill_context)
+    if optimizer_ctx:
+        content.append({"type": "text", "text": optimizer_ctx + "\n\n"})
+
+    content.append({"type": "text", "text": f"## {trajectory_kind} Trajectories ({len(items)} total)\n"})
+
+    for idx, item in enumerate(items, 1):
+        traj_text = fmt_minibatch_trajectories([item], prediction_dir).strip()
+        if not traj_text:
+            continue
+        has_trajectory = True
+        content.append({"type": "text", "text": traj_text + "\n"})
+        for image_path in item.get("image_paths", []):
+            if not image_path:
+                continue
+            try:
+                content.append({"type": "image_url", "image_url": {"url": _image_to_data_uri(str(image_path))}})
+            except Exception:
+                continue
+
+    if not has_trajectory:
+        return []
+    return content
+
+
 # ── Prompt resolution ───────────────────────────────────────────────────────
 
 
@@ -290,40 +369,28 @@ def run_error_analyst_minibatch(
     """
     mode = normalize_update_mode(update_mode)
     actual_system = _resolve_prompt(system_prompt, "analyst_error", mode)
-
-    trajectories_text = fmt_minibatch_trajectories(items, prediction_dir)
-    if not trajectories_text.strip():
+    user_content = _build_minibatch_user_content(
+        items,
+        prediction_dir,
+        skill_content,
+        edit_budget,
+        mode=mode,
+        step_buffer_context=step_buffer_context,
+        rejection_context=rejection_context,
+        trajectory_memory_context=trajectory_memory_context,
+        meta_skill_context=meta_skill_context,
+        trajectory_kind="Failed",
+    )
+    if len(user_content) <= 1:
         return None
 
-    user = (
-        f"## Current Skill\n{skill_content}\n\n"
-    )
-    if is_full_rewrite_minibatch_mode(mode):
-        user += (
-            f"## Update Format\n"
-            f"Produce one complete replacement skill candidate for this minibatch. "
-            f"Do not output edits, patches, or revise suggestions.\n\n"
-        )
-    else:
-        user += (
-            f"## {payload_label(mode, title=True)} Budget\n"
-            f"Produce at most L={edit_budget} {payload_label(mode)}.\n\n"
-        )
-    # Unified step buffer context (preferred)
-    ctx = step_buffer_context or rejection_context or ""
-    if trajectory_memory_context:
-        ctx = f"{ctx}\n{trajectory_memory_context}" if ctx else trajectory_memory_context
-    if ctx.strip():
-        user += f"## Previous Steps in This Epoch\n{ctx}\n\n"
-    optimizer_ctx = format_meta_skill_context(meta_skill_context)
-    if optimizer_ctx:
-        user += optimizer_ctx + "\n\n"
-    user += f"## Failed Trajectories ({len(items)} total)\n{trajectories_text}"
-
     try:
-        response, _ = chat_optimizer(
-            system=actual_system, user=user,
-            max_completion_tokens=64000 if is_full_rewrite_minibatch_mode(mode) else 4096,
+        response, _ = chat_optimizer_messages(
+            messages=[
+                {"role": "system", "content": actual_system},
+                {"role": "user", "content": user_content},
+            ],
+            max_completion_tokens=64000 if is_full_rewrite_minibatch_mode(mode) else 10000,
             retries=3,
             stage="analyst",
         )
@@ -368,37 +435,27 @@ def run_success_analyst_minibatch(
     """
     mode = normalize_update_mode(update_mode)
     actual_system = _resolve_prompt(system_prompt, "analyst_success", mode)
-
-    trajectories_text = fmt_minibatch_trajectories(items, prediction_dir)
-    if not trajectories_text.strip():
+    user_content = _build_minibatch_user_content(
+        items,
+        prediction_dir,
+        skill_content,
+        edit_budget,
+        mode=mode,
+        step_buffer_context=step_buffer_context,
+        trajectory_memory_context=trajectory_memory_context,
+        meta_skill_context=meta_skill_context,
+        trajectory_kind="Successful",
+    )
+    if len(user_content) <= 1:
         return None
 
-    user = (
-        f"## Current Skill\n{skill_content}\n\n"
-    )
-    if is_full_rewrite_minibatch_mode(mode):
-        user += (
-            f"## Update Format\n"
-            f"Produce one complete replacement skill candidate for this minibatch. "
-            f"Do not output edits, patches, or revise suggestions.\n\n"
-        )
-    else:
-        user += (
-            f"## {payload_label(mode, title=True)} Budget\n"
-            f"Produce at most L={edit_budget} {payload_label(mode)}.\n\n"
-        )
-    ctx = step_buffer_context or trajectory_memory_context or ""
-    if ctx.strip():
-        user += f"## Previous Steps in This Epoch\n{ctx}\n\n"
-    optimizer_ctx = format_meta_skill_context(meta_skill_context)
-    if optimizer_ctx:
-        user += optimizer_ctx + "\n\n"
-    user += f"## Successful Trajectories ({len(items)} total)\n{trajectories_text}"
-
     try:
-        response, _ = chat_optimizer(
-            system=actual_system, user=user,
-            max_completion_tokens=64000 if is_full_rewrite_minibatch_mode(mode) else 4096,
+        response, _ = chat_optimizer_messages(
+            messages=[
+                {"role": "system", "content": actual_system},
+                {"role": "user", "content": user_content},
+            ],
+            max_completion_tokens=64000 if is_full_rewrite_minibatch_mode(mode) else 10000,
             retries=3,
             stage="analyst",
         )

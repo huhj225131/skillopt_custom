@@ -74,7 +74,7 @@ def rank_and_select(
     try:
         response, _ = chat_optimizer(
             system=load_prompt(prompt_name), user=user,
-            max_completion_tokens=2048, retries=3, stage="ranking",
+            max_completion_tokens=10000, retries=3, stage="ranking",
         )
         result = extract_json(response)
         if result and "selected_indices" in result:

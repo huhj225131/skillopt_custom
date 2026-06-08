@@ -652,7 +652,7 @@ def process_one(
             for turn in range(1, max_tool_turns + 1):
                 message, _ = chat_target_messages(
                     messages=messages,
-                    max_completion_tokens=768,
+                    max_completion_tokens=10000,
                     retries=5,
                     stage="rollout",
                     tools=_TOOL_SCHEMAS,

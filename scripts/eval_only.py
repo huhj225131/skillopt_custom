@@ -101,6 +101,13 @@ def _register_builtins() -> None:
         _ENV_REGISTRY["swebench"] = SWEBenchAdapter
     except ImportError:
         pass
+    try:
+        from skillopt.envs.SeePhys2025.adapter import SeePhys2025Adapter
+
+        _ENV_REGISTRY["SeePhys2025"] = SeePhys2025Adapter
+        _ENV_REGISTRY["seephys2025"] = SeePhys2025Adapter
+    except ImportError:
+        pass
 
 
 def get_adapter(cfg: dict):

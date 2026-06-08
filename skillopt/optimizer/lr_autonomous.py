@@ -76,7 +76,7 @@ def decide_autonomous_learning_rate(
         response, _ = chat_optimizer(
             system=load_prompt("lr_autonomous"),
             user=user,
-            max_completion_tokens=2048,
+            max_completion_tokens=10000,
             retries=3,
             stage="lr_autonomous",
         )
